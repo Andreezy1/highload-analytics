@@ -1,0 +1,67 @@
+
+
+services:
+  postgres:
+    image: postgres:17
+    container_name: highload-postgres
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      POSTGRES_DB: ${DB_NAME}
+      POSTGRES_USER: ${DB_USER}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${DB_USER} -d $${DB_NAME}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  redis:
+    image: redis:8
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  migrate:
+    image: migrate/migrate
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ./migrations:/migrations
+    command:
+      [
+        "-path", "/migrations",
+        "-database", "postgres://${DB_USER}:${DB_PASSWORD}@${DB_HOST}:${DB_PORT}/${DB_NAME}?sslmode=${DB_SSLMODE}",
+        "up"
+      ]
+
+  analytics-app:
+    build: .
+    ports:
+      - "8080:8080"
+      - "6060:6060"
+    env_file:
+      - .env
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+    # ВОТ ЗДЕСЬ МАГИЯ ОГРАНИЧЕНИЯ РЕСУРСОВ:
+    deploy:
+      resources:
+        limits:
+          cpus: '2'      # Приложение не возьмет больше 1.5 ядер
+          memory: 1024M     # Приложение не возьмет больше 512 МБ ОЗУ
+
+volumes:
+    postgres_data:
