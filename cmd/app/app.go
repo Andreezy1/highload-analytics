@@ -28,14 +28,6 @@ type App struct {
 	Service *service.Service
 }
 
-var (
-	chanSize      = 10000
-	batchSize     = 500
-	flushInterval = 5 * time.Second
-	clientLimit   = 100
-	windowSize    = 10 * time.Second
-)
-
 func newApp(cfg *config.Config, logger *slog.Logger) (*App, error) {
 	dbCtx, dbCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer dbCancel()
@@ -46,7 +38,7 @@ func newApp(cfg *config.Config, logger *slog.Logger) (*App, error) {
 	}
 	repopostgres := postgres.NewPostgresRepository(db)
 
-	service := service.NewService(repopostgres, chanSize, batchSize, flushInterval, logger)
+	service := service.NewService(repopostgres, cfg.ChanSize, cfg.BatchSize, cfg.FlushInterval, logger)
 	service.Start(context.Background())
 
 	redisCtx, redisCancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -63,7 +55,7 @@ func newApp(cfg *config.Config, logger *slog.Logger) (*App, error) {
 	router := chi.NewRouter()
 	router.Use(middleware.RequestID)
 	router.Use(middleware.Recoverer)
-	router.Use(handler.RateLimiterMiddleware(limiter, logger, clientLimit, windowSize))
+	router.Use(handler.RateLimiterMiddleware(limiter, logger, cfg.ClientLimit, cfg.WindowMs))
 	h.RegisterRoutes(router)
 
 	server := &http.Server{

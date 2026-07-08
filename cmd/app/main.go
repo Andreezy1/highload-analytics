@@ -4,6 +4,7 @@ import (
 	"highload-analytics/config"
 	"log/slog"
 	"net/http"
+	_ "net/http/pprof"
 	"os"
 
 	"github.com/joho/godotenv"
@@ -25,7 +26,7 @@ func main() {
 	go func() {
 		logger.Info("starting pprof server on ^6060")
 		if err := http.ListenAndServe(":6060", nil); err != nil {
-			logger.Info("pprof server failed^ %v", err)
+			logger.Info("pprof server failed^ %v", slog.Any("error", err))
 		}
 	}()
 	run(app, logger)

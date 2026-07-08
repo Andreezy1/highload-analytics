@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"highload-analytics/internal/domain"
 	"log/slog"
 	"runtime"
@@ -94,8 +95,34 @@ func (s *Service) worker(ctx context.Context) {
 }
 
 func (s *Service) flush(ctx context.Context, batch []domain.Event) {
-	if err := s.repo.InsertBatch(ctx, batch); err != nil {
-		s.logger.Error("failed to flush batch", slog.Any("error", err))
-		return
+	flushCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+
+	maxRetries := 3
+	backoff := 500 * time.Millisecond
+
+	var err error
+	for i := range maxRetries {
+		if err = s.repo.InsertBatch(flushCtx, batch); err == nil {
+			return
+		}
+		if errors.Is(flushCtx.Err(), context.DeadlineExceeded) || errors.Is(flushCtx.Err(), context.Canceled) {
+			break
+		}
+		s.logger.Warn("Transient flush failure, retrying...",
+			slog.Int("attempt", i+1),
+			slog.Any("error", err),
+		)
+
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(backoff):
+			backoff *= 2
+		}
 	}
+	s.logger.Error("CRITICAL: Failed to flush batch after all retries. Data lost!",
+		slog.Any("error", err),
+		slog.Int("batch_size", len(batch)),
+	)
 }

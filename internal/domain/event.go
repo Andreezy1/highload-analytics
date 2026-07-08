@@ -3,6 +3,7 @@ package domain
 import (
 	"fmt"
 	"time"
+	"unicode/utf8"
 )
 
 type Event struct {
@@ -18,6 +19,9 @@ func (e *Event) Validate() error {
 	}
 	if e.EventType == "" {
 		return fmt.Errorf("%w: event_type is required", ErrValidate)
+	}
+	if utf8.RuneCountInString(e.EventType) >= 255 {
+		return fmt.Errorf("%w: event_type len string more 255", ErrValidate)
 	}
 	if e.Time.IsZero() {
 		return fmt.Errorf("%w: time is required", ErrValidate)

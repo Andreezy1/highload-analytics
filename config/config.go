@@ -1,6 +1,10 @@
 package config
 
-import "github.com/caarlos0/env"
+import (
+	"time"
+
+	"github.com/caarlos0/env"
+)
 
 type Config struct {
 	HTTPPort string `env:"HTTP_PORT" envDefault:"8080"`
@@ -13,6 +17,12 @@ type Config struct {
 	DBSSLMode  string `env:"DB_SSLMODE" envDefault:"disable"`
 
 	RedisAddress string `env:"REDIS_ADDRESS,required"`
+
+	ChanSize      int           `env:"CHAN_SIZE" envDefault:"10000"`
+	BatchSize     int           `env:"BATCH_SIZE" envDefault:"500"`
+	FlushInterval time.Duration `env:"FLUSH_INTERVAL" envDefault:"1s"`
+	ClientLimit   int           `env:"CLIENT_LIMIT" envDefault:"1000000"`
+	WindowMs      time.Duration `env:"WINDOWS_MS" envDefault:"60s"`
 }
 
 func Load() (*Config, error) {
