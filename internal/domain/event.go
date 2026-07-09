@@ -7,10 +7,10 @@ import (
 )
 
 type Event struct {
-	UserID    int64     `db:"user_id"`
-	EventType string    `db:"event_type"`
-	Time      time.Time `db:"time"`
-	PageUrl   string    `db:"page_url"`
+	UserID    int64
+	EventType string
+	Time      time.Time
+	PageURL   string
 }
 
 func (e *Event) Validate() error {
@@ -20,14 +20,17 @@ func (e *Event) Validate() error {
 	if e.EventType == "" {
 		return fmt.Errorf("%w: event_type is required", ErrValidate)
 	}
-	if utf8.RuneCountInString(e.EventType) >= 255 {
-		return fmt.Errorf("%w: event_type len string more 255", ErrValidate)
+	if utf8.RuneCountInString(e.EventType) > 255 {
+		return fmt.Errorf("%w: event_type exceeds 255 characters", ErrValidate)
 	}
 	if e.Time.IsZero() {
 		return fmt.Errorf("%w: time is required", ErrValidate)
 	}
-	if e.PageUrl == "" {
+	if e.PageURL == "" {
 		return fmt.Errorf("%w: page_url is required", ErrValidate)
+	}
+	if utf8.RuneCountInString(e.PageURL) > 255 {
+		return fmt.Errorf("%w: page_url exceeds 255 characters", ErrValidate)
 	}
 	return nil
 }

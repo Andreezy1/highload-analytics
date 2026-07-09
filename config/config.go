@@ -18,11 +18,12 @@ type Config struct {
 
 	RedisAddress string `env:"REDIS_ADDRESS,required"`
 
-	ChanSize      int           `env:"CHAN_SIZE" envDefault:"10000"`
-	BatchSize     int           `env:"BATCH_SIZE" envDefault:"500"`
-	FlushInterval time.Duration `env:"FLUSH_INTERVAL" envDefault:"1s"`
-	ClientLimit   int           `env:"CLIENT_LIMIT" envDefault:"1000000"`
-	WindowMs      time.Duration `env:"WINDOWS_MS" envDefault:"60s"`
+	WorkerCount     int           `env:"WORKER_COUNT" envDefault:"5"`
+	ChanSize        int           `env:"CHAN_SIZE" envDefault:"10000"`
+	BatchSize       int           `env:"BATCH_SIZE" envDefault:"500"`
+	FlushInterval   time.Duration `env:"FLUSH_INTERVAL" envDefault:"1s"`
+	ClientLimit     int           `env:"CLIENT_LIMIT" envDefault:"1000000"`
+	RateLimitWindow time.Duration `env:"RATE_LIMIT_WINDOW" envDefault:"60s"`
 }
 
 func Load() (*Config, error) {

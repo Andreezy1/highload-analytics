@@ -12,12 +12,14 @@ import (
 )
 
 type Repository struct {
-	db *pgxpool.Pool
+	db     *pgxpool.Pool
+	logger *slog.Logger
 }
 
-func NewPostgresRepository(db *pgxpool.Pool) *Repository {
+func NewPostgresRepository(db *pgxpool.Pool, logger *slog.Logger) *Repository {
 	return &Repository{
-		db: db,
+		db:     db,
+		logger: logger,
 	}
 }
 
@@ -31,7 +33,7 @@ func (r *Repository) InsertBatch(ctx context.Context, events []domain.Event) err
 			event.UserID,
 			event.EventType,
 			event.Time,
-			event.PageUrl,
+			event.PageURL,
 		})
 	}
 
@@ -42,7 +44,7 @@ func (r *Repository) InsertBatch(ctx context.Context, events []domain.Event) err
 		pgx.CopyFromRows(rows),
 	)
 	if err != nil {
-		return mapError(err)
+		return r.insertRowByRowFallback(ctx, events, err)
 	}
 	return nil
 }
@@ -53,28 +55,28 @@ func (r *Repository) insertRowByRowFallback(
 	batchErr error,
 ) error {
 	if errors.Is(ctx.Err(), context.DeadlineExceeded) || errors.Is(ctx.Err(), context.Canceled) {
-		return batchErr
+		return mapError(batchErr)
 	}
 
 	query := `INSERT INTO events (user_id, event_type, time, page_url)
 			  VALUES ($1,$2,$3,$4)`
 
 	for _, event := range events {
-		_, err := r.db.Exec(ctx, query, event.UserID, event.EventType, event.Time, event.PageUrl)
+		_, err := r.db.Exec(ctx, query, event.UserID, event.EventType, event.Time, event.PageURL)
 		if err != nil {
 			if errors.Is(ctx.Err(), context.DeadlineExceeded) || errors.Is(ctx.Err(), context.Canceled) {
 				return err
 			}
 			var pgErr *pgconn.PgError
 			if errors.As(err, &pgErr) {
-				slog.Error("Poison pill event dropped during fallback insertion",
+				r.logger.Error("Poison pill event dropped during fallback insertion",
 					slog.String("sql_state", pgErr.Code),
 					slog.Any("error", err),
 					slog.Any("failed_event", event),
 				)
 				continue
 			}
-			return err
+			return mapError(err)
 		}
 
 	}

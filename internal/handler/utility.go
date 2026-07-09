@@ -33,7 +33,7 @@ func (h *Handler) writeServiceError(w http.ResponseWriter, err error) {
 	h.writeError(w, status, err.Error())
 }
 
-func (h *Handler) newDecoder(w http.ResponseWriter, r *http.Request, body any) error {
+func (h *Handler) decodeJSON(w http.ResponseWriter, r *http.Request, body any) error {
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	decoder := json.NewDecoder(r.Body)
 	decoder.DisallowUnknownFields()

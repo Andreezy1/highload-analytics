@@ -4,7 +4,7 @@ import (
 	"highload-analytics/config"
 	"log/slog"
 	"net/http"
-	_ "net/http/pprof"
+	"net/http/pprof"
 	"os"
 
 	"github.com/joho/godotenv"
@@ -24,9 +24,15 @@ func main() {
 		os.Exit(1)
 	}
 	go func() {
-		logger.Info("starting pprof server on ^6060")
-		if err := http.ListenAndServe(":6060", nil); err != nil {
-			logger.Info("pprof server failed^ %v", slog.Any("error", err))
+		mux := http.NewServeMux()
+		mux.HandleFunc("/debug/pprof/", pprof.Index)
+		mux.HandleFunc("/debug/pprof/profile", pprof.Profile)
+		mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
+		mux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
+
+		logger.Info("starting pprof server", slog.String("addr", "localhost:6060"))
+		if err := http.ListenAndServe("localhost:6060", mux); err != nil {
+			logger.Error("pprof server failed", slog.Any("error", err))
 		}
 	}()
 	run(app, logger)

@@ -36,10 +36,10 @@ func newApp(cfg *config.Config, logger *slog.Logger) (*App, error) {
 	if err != nil {
 		return nil, err
 	}
-	repopostgres := postgres.NewPostgresRepository(db)
+	repopostgres := postgres.NewPostgresRepository(db, logger)
 
-	service := service.NewService(repopostgres, cfg.ChanSize, cfg.BatchSize, cfg.FlushInterval, logger)
-	service.Start(context.Background())
+	svc := service.NewService(repopostgres, cfg.ChanSize, cfg.BatchSize, cfg.WorkerCount, cfg.FlushInterval, logger)
+	svc.Start(context.Background())
 
 	redisCtx, redisCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer redisCancel()
@@ -50,12 +50,12 @@ func newApp(cfg *config.Config, logger *slog.Logger) (*App, error) {
 	}
 	limiter := redislimiter.NewRedisLimiter(rdb)
 
-	h := handler.NewHandler(service, logger)
+	h := handler.NewHandler(svc, logger)
 
 	router := chi.NewRouter()
 	router.Use(middleware.RequestID)
 	router.Use(middleware.Recoverer)
-	router.Use(handler.RateLimiterMiddleware(limiter, logger, cfg.ClientLimit, cfg.WindowMs))
+	router.Use(handler.RateLimiterMiddleware(limiter, logger, cfg.ClientLimit, cfg.RateLimitWindow))
 	h.RegisterRoutes(router)
 
 	server := &http.Server{
@@ -70,7 +70,7 @@ func newApp(cfg *config.Config, logger *slog.Logger) (*App, error) {
 		Server:  server,
 		DB:      db,
 		Redis:   rdb,
-		Service: service,
+		Service: svc,
 	}, nil
 }
 

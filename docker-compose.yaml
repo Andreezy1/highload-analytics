@@ -49,19 +49,19 @@ services:
     build: .
     ports:
       - "8080:8080"
-      - "6060:6060"
+      - "127.0.0.1:6060:6060"
     env_file:
       - .env
     depends_on:
       migrate:
         condition: service_completed_successfully
 
-    # ВОТ ЗДЕСЬ МАГИЯ ОГРАНИЧЕНИЯ РЕСУРСОВ:
     deploy:
       resources:
         limits:
-          cpus: '2'      # Приложение не возьмет больше 1.5 ядер
-          memory: 1024M     # Приложение не возьмет больше 512 МБ ОЗУ
+          cpus: '2'      
+          memory: 1024M     
 
 volumes:
     postgres_data:
+    

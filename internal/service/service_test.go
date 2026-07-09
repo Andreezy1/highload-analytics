@@ -1,118 +1,289 @@
-package service
+package service_test
 
 import (
 	"context"
+	"errors"
 	"highload-analytics/internal/domain"
+	"highload-analytics/internal/service"
+	"io"
 	"log/slog"
-	"os"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
 
-// MockRepository — фейковый репозиторий для перехвата батчей в тестах
-type MockRepository struct {
+// mockRepository перехватывает батчи и сигналит о каждом успешном флаше
+// в канал flushed, чтобы тесты синхронизировались без time.Sleep.
+type mockRepository struct {
 	mu           sync.Mutex
-	SavedBatches [][]domain.Event
-	InsertFunc   func(ctx context.Context, events []domain.Event) error
+	savedBatches [][]domain.Event
+	insertFunc   func(ctx context.Context, events []domain.Event) error
+	flushed      chan []domain.Event
 }
 
-func (m *MockRepository) InsertBatch(ctx context.Context, events []domain.Event) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	// Копируем батч, чтобы избежать race condition при очистке в воркере
+func newMockRepository() *mockRepository {
+	return &mockRepository{flushed: make(chan []domain.Event, 16)}
+}
+
+func (m *mockRepository) InsertBatch(ctx context.Context, events []domain.Event) error {
+	// Копия обязательна: воркер переиспользует слайс через batch[:0].
 	cpy := make([]domain.Event, len(events))
 	copy(cpy, events)
-	m.SavedBatches = append(m.SavedBatches, cpy)
 
-	if m.InsertFunc != nil {
-		return m.InsertFunc(ctx, events)
+	if m.insertFunc != nil {
+		if err := m.insertFunc(ctx, cpy); err != nil {
+			return err
+		}
 	}
+
+	m.mu.Lock()
+	m.savedBatches = append(m.savedBatches, cpy)
+	m.mu.Unlock()
+
+	m.flushed <- cpy
 	return nil
 }
 
-// Помощник для создания сервиса в тестах
-func newTestService(repo *MockRepository, batchSize int, interval time.Duration) *Service {
-	return &Service{
-		repo:          repo,
-		logger:        slog.New(slog.NewTextHandler(os.Stdout, nil)),
-		batchSize:     batchSize,
-		flushInterval: interval,
-		eventChan:     make(chan domain.Event, batchSize*2),
+func (m *mockRepository) batches() [][]domain.Event {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([][]domain.Event, len(m.savedBatches))
+	copy(out, m.savedBatches)
+	return out
+}
+
+func discardLogger() *slog.Logger {
+	return slog.New(slog.NewTextHandler(io.Discard, nil))
+}
+
+func validEvent(userID int64) domain.Event {
+	return domain.Event{
+		UserID:    userID,
+		EventType: "click",
+		Time:      time.Date(2026, time.July, 9, 12, 0, 0, 0, time.UTC),
+		PageURL:   "/home",
 	}
 }
 
-// ТЕСТ 1: Проверяем сброс батча при достижении лимита по размеру (Size Trigger)
-func TestWorker_FlushOnSizeTrigger(t *testing.T) {
-	mockRepo := &MockRepository{}
-	// Ставим заведомо большой интервал тикера (1 час), чтобы он гарантированно не сработал во время теста
-	svc := newTestService(mockRepo, 3, time.Hour)
+func waitFlush(t *testing.T, repo *mockRepository) []domain.Event {
+	t.Helper()
+	select {
+	case batch := <-repo.flushed:
+		return batch
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for flush")
+		return nil
+	}
+}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+// Флаш по достижении batchSize; тикер заведомо не срабатывает (1 час).
+func TestService_FlushOnSizeTrigger(t *testing.T) {
+	repo := newMockRepository()
+	svc := service.NewService(repo, 10, 3, 1, time.Hour, discardLogger())
+	svc.Start(t.Context())
+	defer svc.Stop()
 
-	svc.wg.Add(1)
-	go svc.worker(ctx)
+	for i := int64(1); i <= 3; i++ {
+		if err := svc.Create(t.Context(), validEvent(i)); err != nil {
+			t.Fatalf("Create(%d): %v", i, err)
+		}
+	}
 
-	// Отправляем 3 события (размер нашего батча)
-	svc.eventChan <- domain.Event{UserID: 1, EventType: "click"}
-	svc.eventChan <- domain.Event{UserID: 2, EventType: "view"}
-	svc.eventChan <- domain.Event{UserID: 3, EventType: "purchase"}
+	batch := waitFlush(t, repo)
+	if len(batch) != 3 {
+		t.Fatalf("want batch of 3 events, got %d", len(batch))
+	}
+}
 
-	// Даем горутине воркера микросекунду переварить данные
+// Флаш по тикеру: событий меньше batchSize, батч уходит по интервалу.
+func TestService_FlushOnTicker(t *testing.T) {
+	repo := newMockRepository()
+	svc := service.NewService(repo, 10, 100, 1, 20*time.Millisecond, discardLogger())
+	svc.Start(t.Context())
+	defer svc.Stop()
+
+	if err := svc.Create(t.Context(), validEvent(1)); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	batch := waitFlush(t, repo)
+	if len(batch) != 1 {
+		t.Fatalf("want batch of 1 event, got %d", len(batch))
+	}
+}
+
+// Graceful shutdown: недобранный батч сбрасывается при Stop.
+func TestService_DrainOnShutdown(t *testing.T) {
+	repo := newMockRepository()
+	svc := service.NewService(repo, 10, 5, 1, time.Hour, discardLogger())
+	svc.Start(t.Context())
+
+	for i := int64(1); i <= 2; i++ {
+		if err := svc.Create(t.Context(), validEvent(i)); err != nil {
+			t.Fatalf("Create(%d): %v", i, err)
+		}
+	}
+
+	// Stop ждёт воркеров, так что после возврата финальный флаш гарантирован.
+	svc.Stop()
+
+	batches := repo.batches()
+	if len(batches) != 1 {
+		t.Fatalf("want exactly 1 drained batch, got %d", len(batches))
+	}
+	if len(batches[0]) != 2 {
+		t.Fatalf("want 2 events in drained batch, got %d", len(batches[0]))
+	}
+}
+
+// Переполнение буфера: без воркеров второй Create в канал размера 1 не влезает.
+func TestService_CreateQueueFull(t *testing.T) {
+	repo := newMockRepository()
+	svc := service.NewService(repo, 1, 100, 1, time.Hour, discardLogger())
+	// Start намеренно не вызывается — канал никто не вычитывает.
+
+	if err := svc.Create(t.Context(), validEvent(1)); err != nil {
+		t.Fatalf("first Create must fit into buffer: %v", err)
+	}
+	err := svc.Create(t.Context(), validEvent(2))
+	if !errors.Is(err, domain.ErrQueueFull) {
+		t.Fatalf("want ErrQueueFull, got %v", err)
+	}
+}
+
+// Невалидное событие отклоняется до постановки в очередь.
+func TestService_CreateValidatesEvent(t *testing.T) {
+	repo := newMockRepository()
+	svc := service.NewService(repo, 10, 100, 1, time.Hour, discardLogger())
+
+	err := svc.Create(t.Context(), domain.Event{})
+	if !errors.Is(err, domain.ErrValidate) {
+		t.Fatalf("want ErrValidate, got %v", err)
+	}
+}
+
+// После Stop сервис отвечает ErrQueueFull, а не паникует.
+func TestService_CreateAfterStop(t *testing.T) {
+	repo := newMockRepository()
+	svc := service.NewService(repo, 10, 100, 1, time.Hour, discardLogger())
+	svc.Start(t.Context())
+	svc.Stop()
+
+	err := svc.Create(t.Context(), validEvent(1))
+	if !errors.Is(err, domain.ErrQueueFull) {
+		t.Fatalf("want ErrQueueFull after Stop, got %v", err)
+	}
+}
+
+// Повторный Stop не должен паниковать (двойной close канала).
+func TestService_StopIsIdempotent(t *testing.T) {
+	repo := newMockRepository()
+	svc := service.NewService(repo, 10, 100, 1, time.Hour, discardLogger())
+	svc.Start(t.Context())
+
+	svc.Stop()
+	svc.Stop()
+}
+
+// Регрессионный тест на гонку shutdown: конкурентные Create во время Stop
+// не должны паниковать отправкой в закрытый канал (ловится под -race).
+func TestService_ConcurrentCreateAndStop(t *testing.T) {
+	repo := newMockRepository()
+	// Дренируем сигнальный канал, чтобы его буфер не заблокировал воркеров.
+	go func() {
+		for range repo.flushed {
+			continue
+		}
+	}()
+
+	svc := service.NewService(repo, 1000, 10, 2, time.Hour, discardLogger())
+	svc.Start(t.Context())
+
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	for w := range 8 {
+		wg.Add(1)
+		go func(producer int) {
+			defer wg.Done()
+			for i := int64(1); ; i++ {
+				err := svc.Create(t.Context(), validEvent(int64(producer)*1_000_000+i))
+				if err != nil && !errors.Is(err, domain.ErrQueueFull) {
+					t.Errorf("unexpected Create error: %v", err)
+					return
+				}
+				select {
+				case <-stop:
+					return
+				default:
+				}
+			}
+		}(w)
+	}
+
+	// Короткая пауза только чтобы Stop пересёкся с активными Create;
+	// корректность теста от её длительности не зависит.
 	time.Sleep(10 * time.Millisecond)
+	svc.Stop()
+	close(stop)
+	wg.Wait()
 
-	mockRepo.mu.Lock()
-	batchesCount := len(mockRepo.SavedBatches)
-	mockRepo.mu.Unlock()
-
-	if batchesCount != 1 {
-		t.Fatalf("Ожидали 1 сброшенный батч, получили %d. Триггер размера не сработал.", batchesCount)
-	}
-
-	if len(mockRepo.SavedBatches[0]) != 3 {
-		t.Errorf("Ожидали 3 элемента в батче, получили %d", len(mockRepo.SavedBatches[0]))
+	if err := svc.Create(t.Context(), validEvent(1)); !errors.Is(err, domain.ErrQueueFull) {
+		t.Fatalf("want ErrQueueFull after Stop, got %v", err)
 	}
 }
 
-// ТЕСТ 2: Проверяем Graceful Shutdown — выгребание остатков (Drain) при закрытии канала
-func TestWorker_DrainOnShutdown(t *testing.T) {
-	mockRepo := &MockRepository{}
-	// Опять отключаем тикер большим таймаутом
-	svc := newTestService(mockRepo, 5, time.Hour)
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	svc.wg.Add(1)
-	go svc.worker(ctx)
-
-	// Отправляем всего 2 события (батч размером 5 еще НЕ заполнен)
-	svc.eventChan <- domain.Event{UserID: 1, EventType: "click"}
-	svc.eventChan <- domain.Event{UserID: 2, EventType: "view"}
-
-	time.Sleep(5 * time.Millisecond)
-
-	// В этот момент в базу ничего улететь не должно
-	mockRepo.mu.Lock()
-	if len(mockRepo.SavedBatches) != 0 {
-		t.Errorf("Батч улетел раньше времени")
-	}
-	mockRepo.mu.Unlock()
-
-	// Имитируем остановку приложения: закрываем канал, как это происходит при Graceful Shutdown
-	close(svc.eventChan)
-	svc.wg.Wait() // Ждем, пока воркер штатно завершит работу и выйдет из цикла
-
-	// Теперь остатки (2 ивента) обязаны быть сохранены!
-	mockRepo.mu.Lock()
-	defer mockRepo.mu.Unlock()
-
-	if len(mockRepo.SavedBatches) != 1 {
-		t.Fatalf("После закрытия канала остатки данных потерялись. Ожидали 1 батч, получили %d", len(mockRepo.SavedBatches))
+// Ретрай: первая вставка падает, вторая успешна — батч не теряется.
+func TestService_FlushRetriesTransientError(t *testing.T) {
+	var calls atomic.Int64
+	repo := newMockRepository()
+	repo.insertFunc = func(_ context.Context, _ []domain.Event) error {
+		if calls.Add(1) == 1 {
+			return errors.New("transient: connection reset")
+		}
+		return nil
 	}
 
-	if len(mockRepo.SavedBatches[0]) != 2 {
-		t.Errorf("Ожидали 2 «зависших» элемента в финальном батче, получили %d", len(mockRepo.SavedBatches[0]))
+	svc := service.NewService(repo, 10, 1, 1, time.Hour, discardLogger())
+	svc.Start(t.Context())
+	defer svc.Stop()
+
+	if err := svc.Create(t.Context(), validEvent(1)); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	batch := waitFlush(t, repo)
+	if len(batch) != 1 {
+		t.Fatalf("want batch of 1 event, got %d", len(batch))
+	}
+	if got := calls.Load(); got != 2 {
+		t.Fatalf("want 2 InsertBatch calls (fail + retry), got %d", got)
+	}
+}
+
+// Исчерпание ретраев: ровно maxRetries попыток, затем батч отбрасывается.
+func TestService_FlushGivesUpAfterMaxRetries(t *testing.T) {
+	var calls atomic.Int64
+	repo := newMockRepository()
+	repo.insertFunc = func(_ context.Context, _ []domain.Event) error {
+		calls.Add(1)
+		return errors.New("permanent failure")
+	}
+
+	svc := service.NewService(repo, 10, 1, 1, time.Hour, discardLogger())
+	svc.Start(t.Context())
+
+	if err := svc.Create(t.Context(), validEvent(1)); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	// Stop дожидается воркера, который к этому моменту прошёл все ретраи.
+	svc.Stop()
+
+	if got := calls.Load(); got != 3 {
+		t.Fatalf("want exactly 3 InsertBatch attempts, got %d", got)
+	}
+	if batches := repo.batches(); len(batches) != 0 {
+		t.Fatalf("batch must be dropped after retries, got %d saved batches", len(batches))
 	}
 }

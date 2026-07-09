@@ -32,7 +32,7 @@ func NewHandler(service EventService, logger *slog.Logger) *Handler {
 
 func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 	var event eventDtoRequest
-	if err := h.newDecoder(w, r, &event); err != nil {
+	if err := h.decodeJSON(w, r, &event); err != nil {
 		h.writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
